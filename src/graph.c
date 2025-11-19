@@ -10,12 +10,15 @@ typedef uint64_t gkey_t;
 
 typedef enum { OWNER_LOCAL = 0, OWNER_REMOTE = 1 } owner_t;
 
+//for a node’s outgoing neighbors
 typedef struct {
     gkey_t  *data; // pointer to contiguous array of keys
     int      len, cap; // how many elements are used and allocated
 } keyvec_t;
 
+// append one child key to a node’s neighbor list
 static inline void keyvec_push(keyvec_t *v, gkey_t x){
+    //double cap if full
     if (v->len == v->cap){
         v->cap = v->cap ? v->cap*2 : 4;
         v->data = (gkey_t*)realloc(v->data, v->cap * sizeof(gkey_t));
@@ -27,7 +30,7 @@ typedef struct {
     gkey_t   key;     // node id 
     void    *value;   // pointer to your object
     owner_t  owner;   // LOCAL or REMOTE
-    keyvec_t out;     // children keys (directed edges)
+    keyvec_t out;     // outgoing edges 
 } dnode_t;
 
 typedef struct {
@@ -38,13 +41,14 @@ typedef struct {
 
 /* ---------- basic helpers ---------- */
 
+//allocate empty graph
 static inline dgraph_t* dg_new(int cap_hint){
     dgraph_t *g = (dgraph_t*)calloc(1, sizeof(*g));
     g->cap = cap_hint > 0 ? cap_hint : 8;
     g->nodes = (dnode_t*)calloc(g->cap, sizeof(dnode_t));
     return g;
 }
-
+// frees every node’s neighbor data, then the nodes array, then the graph
 static inline void dg_free(dgraph_t *g){
     if (!g) return;
     for (int i=0;i<g->n;i++) free(g->nodes[i].out.data);
@@ -56,7 +60,8 @@ static inline int dg_find_index(const dgraph_t *g, gkey_t key){
     for (int i=0;i<g->n;i++) if (g->nodes[i].key == key) return i;
     return -1;
 }
-//if array full, double its size
+
+//if graph full, double its size
 static inline void dg_grow(dgraph_t *g){
     g->cap = g->cap ? g->cap*2 : 8;
     g->nodes = (dnode_t*)realloc(g->nodes, g->cap * sizeof(dnode_t));
@@ -67,7 +72,7 @@ static inline void dg_grow(dgraph_t *g){
 /* Add node if not present. Returns 1 if inserted, 0 if existed. */
 static inline int dg_add_node(dgraph_t *g, gkey_t key, void *value, owner_t owner){
     int ix = dg_find_index(g, key);
-    if (ix >= 0){ // update value/owner if you want
+    if (ix >= 0){ // update value/owner if already present
         g->nodes[ix].value = value;
         g->nodes[ix].owner = owner;
         return 0;
@@ -86,9 +91,9 @@ static inline int dg_add_node(dgraph_t *g, gkey_t key, void *value, owner_t owne
 static inline void dg_add_edge(dgraph_t *g, gkey_t src, gkey_t dst){
     int s = dg_find_index(g, src);
     int d = dg_find_index(g, dst);
-    assert(s >= 0 && d >= 0); // add nodes first
+    assert(s >= 0 && d >= 0); // both nodes must exist
     keyvec_t *out = &g->nodes[s].out;
-    keyvec_push(out, dst);
+    keyvec_push(out, dst); // append dst to src's outgoing edges
 }
 
 /* Accessors */
@@ -107,23 +112,16 @@ static inline int dg_children(const dgraph_t *g, gkey_t key, const gkey_t **out_
     return 1;
 }
 
-/* ---------- BFS on keys (linear search version) ---------- */
+/* ---------- BFS on keys ---------- */
 
 typedef struct {
-    int *dist;    // by node index
-    int *parent;  // by node index (index of parent, or -1)
+    int *dist;    // distance per node index
+    int *parent;  // parent per node index
 } bfs_result_t;
 
-/* Build a simple index array so we can convert key -> idx faster inside BFS.
-   (Still O(V) per lookup because it's linear search, but we reuse results.) */
-static inline int* dg_build_index_array(const dgraph_t *g){
-    int *idx = (int*)malloc(g->n * sizeof(int));
-    for (int i=0;i<g->n;i++) idx[i] = i;
-    return idx;
-}
-
+// same as dg_find_index but separated for clarity
 static inline int key_to_idx(const dgraph_t *g, gkey_t k){
-    // linear scan (simple!)
+    // linear scan 
     for (int i=0;i<g->n;i++) if (g->nodes[i].key == k) return i;
     return -1;
 }
@@ -132,6 +130,7 @@ static inline bfs_result_t dg_bfs(const dgraph_t *g, gkey_t src_key){
     bfs_result_t R = {0};
     R.dist   = (int*)malloc(g->n * sizeof(int));
     R.parent = (int*)malloc(g->n * sizeof(int));
+    // initialize dist and parent to -1
     for (int i=0;i<g->n;i++){ R.dist[i] = -1; R.parent[i] = -1; }
 
     int src = key_to_idx(g, src_key);
@@ -143,10 +142,11 @@ static inline bfs_result_t dg_bfs(const dgraph_t *g, gkey_t src_key){
     R.dist[src]=0; R.parent[src]=src; q[tail++]=src;
 
     while (head != tail){
-        int u = q[head++]; if (head==g->n) head=0;
+        int u = q[head++]; // dequeue node
+        if (head==g->n) head=0;
         const keyvec_t *out = &g->nodes[u].out;
-        for (int i=0;i<out->len;i++){
-            int v = key_to_idx(g, out->data[i]);
+        for (int i=0;i<out->len;i++){ //Iterate node's outgoing neighbors 
+            int v = key_to_idx(g, out->data[i]); // for each child, map to index
             if (v >= 0 && R.dist[v] == -1){
                 R.dist[v] = R.dist[u] + 1;
                 R.parent[v] = u;
